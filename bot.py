@@ -1,205 +1,110 @@
-"""Telegram delivery bot for Crypto Portfolio & PnL Tracker Pro.
-Payments are verified manually by an administrator. This bot does not process payments.
-"""
-from __future__ import annotations
-
-import json
-import logging
+# -*- coding: utf-8 -*-
 import os
-import tempfile
-import uuid
-from datetime import datetime, timezone
+import logging
+import asyncio
 from pathlib import Path
-from typing import Any
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+log = logging.getLogger(__name__)
+
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "76291486"))
+WALLET_USDT = os.getenv("WALLET_USDT", "0x2f1c79b47fce7f91fca9dfa92030d9c1a85fe2f4")
+PRICE_USDT = 10
+PRODUCT_NAME = "Crypto Portfolio & PnL Tracker Pro"
 
 ROOT = Path(__file__).resolve().parent
-ORDERS_FILE = Path(os.getenv("ORDERS_FILE", str(ROOT / "orders.json")))
-PRODUCT_FILE = Path(os.getenv("PRODUCT_FILE", str(ROOT / "Crypto_Portfolio_and_PnL_Tracker_Pro.xlsx")))
-ADMIN_CONTACT = os.getenv("ADMIN_CONTACT", "@your_admin_username").strip()
-PRODUCT_NAME = "Crypto Portfolio & PnL Tracker Pro"
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-log = logging.getLogger("portfolio_bot")
 
+def find_excel_file():
+    # Search for any xlsx starting with Crypto_Portfolio or containing Pro
+    for pattern in ["Crypto_Portfolio*.xlsx", "*Crypto_Portfolio*.xlsx", "*.xlsx"]:
+        matches = list(ROOT.glob(pattern))
+        if matches:
+            return matches[0]
+    return ROOT / "Crypto_Portfolio_and_PnL_Tracker_Pro.xlsx"
 
-def _load_orders() -> dict[str, dict[str, Any]]:
-    try:
-        raw = json.loads(ORDERS_FILE.read_text(encoding="utf-8"))
-        return raw if isinstance(raw, dict) else {}
-    except FileNotFoundError:
-        return {}
-    except (json.JSONDecodeError, OSError):
-        log.exception("Could not read the orders database")
-        raise RuntimeError("Orders database is unreadable; refusing to overwrite it")
+PRODUCT_FILE = find_excel_file()
 
+orders = {}
 
-def _save_orders(orders: dict[str, dict[str, Any]]) -> None:
-    ORDERS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(prefix="orders-", suffix=".tmp", dir=ORDERS_FILE.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as out:
-            json.dump(orders, out, ensure_ascii=False, indent=2)
-            out.flush()
-            os.fsync(out.fileno())
-        os.replace(temp_name, ORDERS_FILE)
-    finally:
-        if os.path.exists(temp_name):
-            os.unlink(temp_name)
-
-
-def _is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    configured = context.application.bot_data["admin_id"]
-    user = update.effective_user
-    return bool(user and user.id == configured)
-
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        f"سلام! به ربات تحویل {PRODUCT_NAME} خوش آمدید.\n"
-        f"Welcome! This bot delivers {PRODUCT_NAME}.\n\n"
-        "محصول: فایل اکسل برای ثبت و پیگیری پرتفوی رمزارز و سود/زیان (PnL).\n"
-        "Product: an Excel workbook for tracking a crypto portfolio and profit/loss (PnL).\n\n"
-        "برای ثبت سفارش /buy را بفرستید. تحویل فقط پس از بررسی و تأیید دستی پرداخت توسط مدیر انجام می‌شود؛ ربات پرداخت را بررسی یا پردازش نمی‌کند.\n"
-        "Send /buy to create an order. Delivery happens only after the admin manually checks and confirms payment; the bot does not process or verify payments.\n\n"
-        "این فایل ابزار ثبت اطلاعات است و توصیهٔ مالی یا تضمین نتیجه نیست.\n"
-        "This is a record-keeping tool, not financial advice or a guarantee of results."
+        f"🚀 *{PRODUCT_NAME}*\n\n"
+        "Professional Excel / Google Sheets tracker for crypto trading and portfolio management.\n"
+        "• Real-time PnL tracking\n• Multi-exchange support\n• Automated risk metrics\n\n"
+        f"🏷 Price: *{PRICE_USDT} USDT*\n"
+        f"💳 Wallet (BEP20/Polygon/EVM):\n`{WALLET_USDT}`\n\n"
+        "Click below to purchase:"
     )
-    await update.effective_message.reply_text(text)
+    keyboard = [[InlineKeyboardButton(f"Buy Product ({PRICE_USDT} USDT)", callback_data="buy")]]
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
-
-async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    if not user:
-        return
-    order_id = "CP-" + uuid.uuid4().hex[:8].upper()
-    orders = _load_orders()
-    orders[order_id] = {
-        "order_id": order_id,
-        "user_id": user.id,
-        "username": user.username,
-        "first_name": user.first_name,
-        "status": "pending",
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    _save_orders(orders)
-    admin_contact = ADMIN_CONTACT or "(admin contact not configured)"
-    text = (
-        f"سفارش شما برای {PRODUCT_NAME} ثبت شد.\nOrder created for {PRODUCT_NAME}.\n\n"
-        f"شناسه سفارش / Order ID: {order_id}\n\n"
-        f"برای هماهنگی پرداخت، خصوصی به مدیر پیام دهید: {admin_contact}\n"
-        f"Contact the admin privately to arrange payment: {admin_contact}\n"
-        "شناسه سفارش را برای مدیر بفرستید. تحویل فایل فقط پس از تأیید دستی مدیر انجام می‌شود.\n"
-        "Send the order ID to the admin. The workbook is delivered only after the admin manually confirms payment."
-    )
-    await update.effective_message.reply_text(text)
-    for admin_id in [context.application.bot_data["admin_id"]]:
-        try:
-            await context.bot.send_message(
-                chat_id=admin_id,
-                text=(f"سفارش جدید / New order: {order_id}\n"
-                      f"User ID: {user.id}\nUsername: @{user.username}" if user.username else
-                      f"سفارش جدید / New order: {order_id}\nUser ID: {user.id}\nNo username set"),
-            )
-        except Exception:
-            log.info("Could not notify admin about order %s", order_id, exc_info=True)
-
-
-async def orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _is_admin(update, context):
-        await update.effective_message.reply_text("فقط مدیر مجاز است. / Admin only.")
-        return
-    orders = _load_orders()
-    if not orders:
-        await update.effective_message.reply_text("سفارشی ثبت نشده است. / No orders yet.")
-        return
-    lines = ["سفارش‌ها / Orders:"]
-    for item in sorted(orders.values(), key=lambda x: x.get("created_at", "")):
-        lines.append(
-            f"{item.get('order_id')} | {item.get('status')} | user {item.get('user_id')} | "
-            f"@{item.get('username') or '-'} | {item.get('created_at', '')}"
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.data == "buy":
+        user_id = query.from_user.id
+        order_id = f"ORD-{user_id}-{int(asyncio.get_event_loop().time())}"
+        orders[order_id] = {"user_id": user_id, "status": "pending"}
+        text = (
+            f"🛒 Order Created: `{order_id}`\n\n"
+            f"Please send exactly *{PRICE_USDT} USDT* to:\n`{WALLET_USDT}`\n\n"
+            "After payment, notify the admin or wait for confirmation. Admin will approve via command:\n"
+            f"`/paid {order_id}`"
         )
-    # Telegram message limit is 4096 characters.
-    text = "\n".join(lines)
-    for start_at in range(0, len(text), 3900):
-        await update.effective_message.reply_text(text[start_at:start_at + 3900])
+        await query.message.reply_text(text, parse_mode="Markdown")
 
-
-async def paid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _is_admin(update, context):
-        await update.effective_message.reply_text("فقط مدیر مجاز است. / Admin only.")
+async def paid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
         return
-    if len(context.args) != 1:
-        await update.effective_message.reply_text(
-            "استفاده: /paid ORDER_ID\nUsage: /paid ORDER_ID\nاین دستور را فقط پس از بررسی دستی پرداخت اجرا کنید. / Run only after manually verifying payment."
-        )
+    if not context.args:
+        await update.message.reply_text("Usage: /paid <order_id>")
         return
-    order_id = context.args[0].upper()
-    orders = _load_orders()
+    order_id = context.args[0]
     order = orders.get(order_id)
     if not order:
-        await update.effective_message.reply_text("سفارش پیدا نشد. / Order not found.")
+        await update.message.reply_text("Order not found.")
         return
-    if order.get("status") not in ("pending", "paid", "delivery_failed"):
-        await update.effective_message.reply_text(f"وضعیت سفارش قابل تحویل نیست: {order.get('status')} / Order is not deliverable.")
+    
+    excel_path = find_excel_file()
+    if not excel_path.is_file():
+        await update.message.reply_text(f"Product file not found in {ROOT}! Please upload it.")
         return
-    if not PRODUCT_FILE.is_file():
-        await update.effective_message.reply_text(
-            f"فایل محصول در مسیر {PRODUCT_FILE.name} پیدا نشد. پرداخت را بررسی کنید؛ فایل را اضافه و دوباره /paid را اجرا کنید.\n"
-            "Product file missing. Place it beside bot.py, then retry /paid."
-        )
-        return
+
     order["status"] = "paid"
-    order["paid_at"] = datetime.now(timezone.utc).isoformat()
-    order["confirmed_by_admin_id"] = update.effective_user.id
-    _save_orders(orders)
     try:
-        with PRODUCT_FILE.open("rb") as workbook:
+        with excel_path.open("rb") as f:
             await context.bot.send_document(
                 chat_id=order["user_id"],
-                document=workbook,
-                filename=PRODUCT_FILE.name,
-                caption=(f"فایل {PRODUCT_NAME} — سفارش {order_id}\n"
-                         f"{PRODUCT_NAME} workbook — order {order_id}"),
+                document=f,
+                filename="Crypto_Portfolio_and_PnL_Tracker_Pro.xlsx",
+                caption=f"✅ Payment confirmed! Here is your {PRODUCT_NAME}."
             )
         order["status"] = "delivered"
-        order["delivered_at"] = datetime.now(timezone.utc).isoformat()
-        _save_orders(orders)
-        await update.effective_message.reply_text(
-            f"پرداخت دستی تأیید و فایل برای سفارش {order_id} ارسال شد.\n"
-            f"Payment manually confirmed and workbook delivered for {order_id}."
-        )
-    except Exception:
-        order["status"] = "delivery_failed"
-        _save_orders(orders)
-        log.exception("Delivery failed for order %s", order_id)
-        await update.effective_message.reply_text(
-            f"ارسال فایل ناموفق بود؛ پس از رفع مشکل دوباره /paid {order_id} را اجرا کنید.\n"
-            f"Delivery failed; fix the issue and retry /paid {order_id}."
-        )
+        await update.message.reply_text(f"Order {order_id} delivered successfully!")
+    except Exception as e:
+        log.exception("Delivery failed")
+        await update.message.reply_text(f"Error sending file: {e}")
 
+def main():
+    if not TOKEN:
+        raise SystemExit("TELEGRAM_BOT_TOKEN is missing!")
+    
+    excel_path = find_excel_file()
+    if not excel_path.is_file():
+        log.warning(f"Warning: Excel file not found initially at {excel_path}. Will search dynamically.")
+    else:
+        log.info(f"Product file found: {excel_path}")
 
-def main() -> None:
-    token = os.getenv("BOT_TOKEN", "").strip()
-    admin_raw = os.getenv("ADMIN_ID", "").strip()
-    if not token or not admin_raw:
-        raise SystemExit("Set BOT_TOKEN and ADMIN_ID environment variables (see .env.example and README.md).")
-    try:
-        admin_id = int(admin_raw)
-    except ValueError as exc:
-        raise SystemExit("ADMIN_ID must be your numeric Telegram user ID.") from exc
-    if not PRODUCT_FILE.is_file():
-        raise SystemExit(f"Workbook not found: {PRODUCT_FILE}. Put it beside bot.py or set PRODUCT_FILE.")
-    app = Application.builder().token(token).build()
-    app.bot_data["admin_id"] = admin_id
+    app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("buy", buy))
-    app.add_handler(CommandHandler("orders", orders_command))
+    app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(CommandHandler("paid", paid_command))
-    log.info("Bot starting; order data: %s", ORDERS_FILE)
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
-
+    
+    log.info("Bot starting...")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
